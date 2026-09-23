@@ -49,6 +49,14 @@ VOICE_HEAD  = 0x01   # Voice LC header — call start (TS from IPSC header byte 
 VOICE_TERM  = 0x02   # Terminator with LC — call end (TS from IPSC header byte 17)
 SLOT1_VOICE = 0x0A   # Voice burst on Timeslot 1
 SLOT2_VOICE = 0x8A   # Voice burst on Timeslot 2 (bit 7 set)
+# In-call RSSI report (TS from IPSC header byte 17). XPR8400 sends one every third
+# superframe IN PLACE OF voice burst F: it takes that burst's RTP timestamp slot and
+# no burst-F voice packet is sent for that superframe. 40 bytes (+ auth):
+#   bytes 30–37: 24 c0 00 03 c0 00 00 00 (constant in all captures so far)
+#   bytes 38–39: RSSI, big-endian uint16, hundredths of a dB below 0 dBm
+#                (0x267c = 9852 → -98.52 dBm; confirmed against c-Bridge readings)
+VOICE_RSSI  = 0x24
+GV_RSSI_OFF = 38     # bytes 38–39 of a VOICE_RSSI packet
 
 # ---------------------------------------------------------------------------
 # IPSC version field — 4 bytes sent in all registration and keepalive packets.

@@ -33,7 +33,7 @@ from ipsc.const import (
     GROUP_VOICE, PVT_VOICE, GROUP_DATA, PVT_DATA,
     REPEATER_BLOCKED, CALL_INTERRUPT_REQ, XCMP_XNL,
     SYSTEM_MAP_REQ, SYSTEM_MAP_REPLY,
-    VOICE_HEAD, VOICE_TERM,
+    VOICE_HEAD, VOICE_TERM, SLOT1_VOICE, SLOT2_VOICE,
     TS_CALL_MSK,
     GV_CALL_INFO_OFF, GV_BURST_TYPE_OFF,
     GV_MIN_LEN, AUTH_DIGEST_LEN,
@@ -319,12 +319,12 @@ class IPSCMasterProtocol(asyncio.DatagramProtocol):
         log.debug('GROUP_VOICE len=%d burst=0x%02x raw[0:32]=%s from %s:%d',
                   len(data), burst_type, data[:32].hex(), host, port)
 
-        # Timeslot: for VOICE_HEAD/VOICE_TERM read from call_info byte 17;
-        # for SLOT1/SLOT2_VOICE it is encoded in bit 7 of burst_type.
-        if burst_type in (VOICE_HEAD, VOICE_TERM):
-            ts = 2 if (call_info & TS_CALL_MSK) else 1
-        else:
+        # Timeslot: for SLOT1/SLOT2_VOICE it is encoded in bit 7 of burst_type;
+        # for everything else (VOICE_HEAD, VOICE_TERM, VOICE_RSSI) read call_info byte 17.
+        if burst_type in (SLOT1_VOICE, SLOT2_VOICE):
             ts = 2 if (burst_type & 0x80) else 1
+        else:
+            ts = 2 if (call_info & TS_CALL_MSK) else 1
 
         self._translator.ipsc_voice_received(data, ts, burst_type)
 
@@ -694,10 +694,10 @@ class IPSCPeerProtocol(asyncio.DatagramProtocol):
         burst_type = data[GV_BURST_TYPE_OFF]
         call_info  = data[GV_CALL_INFO_OFF]
 
-        if burst_type in (VOICE_HEAD, VOICE_TERM):
-            ts = 2 if (call_info & TS_CALL_MSK) else 1
-        else:
+        if burst_type in (SLOT1_VOICE, SLOT2_VOICE):
             ts = 2 if (burst_type & 0x80) else 1
+        else:
+            ts = 2 if (call_info & TS_CALL_MSK) else 1
 
         # Per-timeslot source lock: the first source to key a timeslot owns it.
         # While it is actively talking, every other source is dropped. For a

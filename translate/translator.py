@@ -6,6 +6,8 @@ Outbound (IPSC → HBP): ipsc_voice_received()
   SLOT1/SLOT2_VOICE: Convert 3×49-bit AMBE from IPSC to 3×72-bit, assemble
                     264-bit DMR voice frame with proper EMBED/SYNC field.
   VOICE_TERM:       Build DMRD VOICE_LC_TERM frame from BPTC-encoded LC.
+  VOICE_RSSI:       Record the in-call RSSI and fill the voice slot it displaced
+                    (repeat the previous burst's AMBE) so the 60 ms cadence holds.
 
 Inbound (HBP → IPSC): hbp_voice_received()
   VOICE_HEAD/TERM:  Reconstruct IPSC header/terminator packet with LC payload.
@@ -50,7 +52,7 @@ from config import Config
 from translate.const import MAX_SYNTH_BURSTS
 from ipsc.const import (
     GROUP_VOICE,
-    VOICE_HEAD, VOICE_TERM, SLOT1_VOICE, SLOT2_VOICE,
+    VOICE_HEAD, VOICE_TERM, SLOT1_VOICE, SLOT2_VOICE, VOICE_RSSI, GV_RSSI_OFF,
     TS_CALL_MSK, END_MSK,
     GV_CALL_SEQ_OFF, GV_CALL_INFO_OFF,
     GV_SRC_SUB_OFF, GV_DST_GROUP_OFF,
@@ -99,6 +101,11 @@ def _make_ambe_silence_ipsc() -> bytes:
     return bits.tobytes()
 
 _AMBE_SILENCE_IPSC = _make_ambe_silence_ipsc()
+
+# 72-bit AMBE silence frame, the fallback filler for a VOICE_RSSI slot that
+# arrives before any real voice burst has been seen on the call.
+_AMBE_SILENCE_72 = bitarray(endian='big')
+_AMBE_SILENCE_72.frombytes(bytes.fromhex('ACAA40200044408080'))
 
 
 def _ambe49_to_72(ba49: bitarray) -> bitarray:
@@ -190,6 +197,8 @@ class CallTranslator:
         self._out_frame_pos      = {1: 0, 2: 0}        # superframe position (0–5, cycles)
         self._out_lc             = {1: None, 2: None}  # 9-byte LC for embedded LC generation
         self._out_emb_lc         = {1: None, 2: None}  # dict {1–4: bitarray(32)} embedded LC
+        self._out_last_ambe      = {1: None, 2: None}  # (a1, a2, a3) 72-bit AMBE of last voice burst
+        self._out_rssi           = {1: [],   2: []}    # dBm readings from VOICE_RSSI, this call
         # Suppress repeat TS-mismatch warnings within a session (one WARNING per affected TS).
         # Reset only on peer_lost / hbp_disconnected so each new session gets a fresh warning.
         self._out_ts_mismatch_warned = {1: False, 2: False}
@@ -251,6 +260,8 @@ class CallTranslator:
         self._out_ipsc_stream_id     = {1: None, 2: None}
         self._out_lc                 = {1: None, 2: None}
         self._out_emb_lc             = {1: None, 2: None}
+        self._out_last_ambe          = {1: None, 2: None}
+        self._out_rssi               = {1: [],   2: []}
         self._out_last_pkt           = {1: 0.0,  2: 0.0}
         self._out_last_rtp_ts        = {1: None, 2: None}
         self._out_ts_mismatch_warned = {1: False, 2: False}
@@ -280,6 +291,8 @@ class CallTranslator:
         self._out_ipsc_stream_id[ts] = None
         self._out_lc[ts]             = None
         self._out_emb_lc[ts]         = None
+        self._out_last_ambe[ts]      = None
+        self._out_rssi[ts]           = []
 
     def _out_call_continues(self, ts: int, rtp_now, prev_rtp) -> bool:
         """True if the current IPSC voice frame continues the active out-call.
@@ -383,6 +396,8 @@ class CallTranslator:
             if self._out_stream_id[ts] is None:
                 self._out_stream_id[ts]      = os.urandom(4)
                 self._out_ipsc_stream_id[ts] = ipsc_stream_id
+                self._out_last_ambe[ts]      = None
+                self._out_rssi[ts]           = []
                 log.info('IPSC call start: src=%d  tg=%d  ts=%d  stream=%s  int_seq_id=0x%02x',
                          int.from_bytes(src_sub, 'big'), int.from_bytes(dst_group, 'big'),
                          ts, self._out_stream_id[ts].hex(), ipsc_stream_id)
@@ -423,6 +438,21 @@ class CallTranslator:
             payload_33 = frame_bits.tobytes()
             flags |= HBPF_FRAMETYPE_DATASYNC | HBPF_SLT_VTERM
 
+        elif burst_type == VOICE_RSSI:
+            # The repeater sends this in place of a voice burst (burst F of every
+            # third superframe), so there is no AMBE for this slot. Dropping it
+            # leaves a 60 ms hole every 1.08 s that downstream sees as ~5.6% loss
+            # and that drains HBP→IPSC jitter buffers on the far end. Fill the slot
+            # by repeating the previous burst's AMBE (silence if there is none yet).
+            if self._out_stream_id[ts] is None or len(data) < GV_RSSI_OFF + 2:
+                return
+            raw  = struct.unpack('>H', data[GV_RSSI_OFF:GV_RSSI_OFF + 2])[0]
+            rssi = -raw / 100
+            self._out_rssi[ts].append(rssi)
+            log.debug('← IPSC ts=%d  RSSI %.2f dBm (raw=0x%04x)', ts, rssi, raw)
+            a1_72, a2_72, a3_72 = self._out_last_ambe[ts] or (_AMBE_SILENCE_72,) * 3
+            flags, payload_33 = self._out_voice_frame(ts, flags, a1_72, a2_72, a3_72)
+
         else:  # SLOT1_VOICE or SLOT2_VOICE
             # Boundary detection. The IPSC call-seq (byte 5) is deliberately NOT
             # consulted: current XPR8400 firmware mints a new call-seq every
@@ -454,6 +484,8 @@ class CallTranslator:
                 self._out_ipsc_stream_id[ts] = ipsc_stream_id
                 self._out_lc[ts]             = lc
                 self._out_emb_lc[ts]         = bptc.encode_emblc(lc)
+                self._out_last_ambe[ts]      = None
+                self._out_rssi[ts]           = []
                 self._out_frame_pos[ts]      = 4  # Burst E is superframe position 4
                 log.info('IPSC late entry: ts=%d src=%d tg=%d — LC from GVCU Burst E, stream=%s  int_seq_id=0x%02x',
                          ts, int.from_bytes(src_sub, 'big'), int.from_bytes(dst_group, 'big'),
@@ -471,13 +503,8 @@ class CallTranslator:
             a1_72 = _ambe49_to_72(raw_ba[0:49])
             a2_72 = _ambe49_to_72(raw_ba[50:99])
             a3_72 = _ambe49_to_72(raw_ba[100:149])
-
-            pos   = self._out_frame_pos[ts] % 6
-            embed = self._build_embed(pos, self._out_emb_lc[ts])
-            frame_bits = a1_72 + a2_72[:36] + embed + a2_72[36:] + a3_72
-            payload_33 = frame_bits.tobytes()
-            flags |= HBPF_FRAMETYPE_VOICESYNC if pos == 0 else (HBPF_FRAMETYPE_VOICE | pos)
-            self._out_frame_pos[ts] += 1
+            self._out_last_ambe[ts] = (a1_72, a2_72, a3_72)
+            flags, payload_33 = self._out_voice_frame(ts, flags, a1_72, a2_72, a3_72)
 
         # Forward under the LOCKED call identity (from _out_lc), never the per-frame
         # header — on a Talker Alias superframe the header src/dst are alias bytes.
@@ -493,16 +520,41 @@ class CallTranslator:
             + bytes([flags])
             + self._out_stream_id[ts]
             + payload_33
-            + b'\x00\x00'   # BER + RSSI (synthesised, no RF measurement)
+            + b'\x00'       # BER (not reported over IPSC)
+            + bytes([self._out_rssi_byte(ts)])
         )
         self._out_seq = (self._out_seq + 1) & 0xFF
         self._hbp.send_dmrd(dmrd)
 
         if burst_type == VOICE_TERM:
-            log.info('IPSC call end:   src=%d  tg=%d  ts=%d  stream=%s  int_seq_id=0x%02x',
+            log.info('IPSC call end:   src=%d  tg=%d  ts=%d  stream=%s  int_seq_id=0x%02x%s',
                      int.from_bytes(out_src, 'big'), int.from_bytes(out_dst, 'big'), ts,
-                     self._out_stream_id[ts].hex(), self._out_ipsc_stream_id[ts])
+                     self._out_stream_id[ts].hex(), self._out_ipsc_stream_id[ts],
+                     self._out_rssi_summary(ts))
             self._reset_out_call(ts)
+
+    def _out_voice_frame(self, ts: int, flags: int, a1_72, a2_72, a3_72):
+        """Assemble the 33-byte DMR voice frame for the next superframe position.
+
+        Returns (flags, payload_33) and advances the superframe position."""
+        pos   = self._out_frame_pos[ts] % 6
+        embed = self._build_embed(pos, self._out_emb_lc[ts])
+        frame_bits = a1_72 + a2_72[:36] + embed + a2_72[36:] + a3_72
+        flags |= HBPF_FRAMETYPE_VOICESYNC if pos == 0 else (HBPF_FRAMETYPE_VOICE | pos)
+        self._out_frame_pos[ts] += 1
+        return flags, frame_bits.tobytes()
+
+    def _out_rssi_byte(self, ts: int) -> int:
+        """HBP DMRD RSSI byte (MMDVM convention: -dBm as an unsigned byte; 0 = none)."""
+        if not self._out_rssi[ts]:
+            return 0
+        return max(0, min(255, round(-self._out_rssi[ts][-1])))
+
+    def _out_rssi_summary(self, ts: int) -> str:
+        r = self._out_rssi[ts]
+        if not r:
+            return ''
+        return '  rssi=%.1f dBm (min %.1f, max %.1f, n=%d)' % (sum(r) / len(r), min(r), max(r), len(r))
 
     def _build_embed(self, pos: int, emb_lc) -> bitarray:
         """Build the 48-bit EMBED field for superframe position 0–5."""
