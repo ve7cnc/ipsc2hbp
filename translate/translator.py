@@ -199,6 +199,12 @@ class CallTranslator:
         self._out_emb_lc         = {1: None, 2: None}  # dict {1–4: bitarray(32)} embedded LC
         self._out_last_ambe      = {1: None, 2: None}  # (a1, a2, a3) 72-bit AMBE of last voice burst
         self._out_rssi           = {1: [],   2: []}    # dBm readings from VOICE_RSSI, this call
+        # Packet loss on the repeater -> us leg, from the repeater's IPSC RTP sequence
+        # numbers (bytes 20-21, +1 per packet in the stream): first and highest
+        # (unwrapped) seen, and how many arrived. See _out_loss_code.
+        self._out_rtp_first      = {1: None, 2: None}
+        self._out_rtp_max        = {1: None, 2: None}
+        self._out_rtp_recv       = {1: 0,    2: 0}
         # Suppress repeat TS-mismatch warnings within a session (one WARNING per affected TS).
         # Reset only on peer_lost / hbp_disconnected so each new session gets a fresh warning.
         self._out_ts_mismatch_warned = {1: False, 2: False}
@@ -262,6 +268,9 @@ class CallTranslator:
         self._out_emb_lc             = {1: None, 2: None}
         self._out_last_ambe          = {1: None, 2: None}
         self._out_rssi               = {1: [],   2: []}
+        self._out_rtp_first          = {1: None, 2: None}
+        self._out_rtp_max            = {1: None, 2: None}
+        self._out_rtp_recv           = {1: 0,    2: 0}
         self._out_last_pkt           = {1: 0.0,  2: 0.0}
         self._out_last_rtp_ts        = {1: None, 2: None}
         self._out_ts_mismatch_warned = {1: False, 2: False}
@@ -293,6 +302,8 @@ class CallTranslator:
         self._out_emb_lc[ts]         = None
         self._out_last_ambe[ts]      = None
         self._out_rssi[ts]           = []
+        self._out_rtp_first[ts]        = None
+        self._out_rtp_recv[ts]         = 0
 
     def _out_call_continues(self, ts: int, rtp_now, prev_rtp) -> bool:
         """True if the current IPSC voice frame continues the active out-call.
@@ -398,6 +409,8 @@ class CallTranslator:
                 self._out_ipsc_stream_id[ts] = ipsc_stream_id
                 self._out_last_ambe[ts]      = None
                 self._out_rssi[ts]           = []
+                self._out_rtp_first[ts]        = None
+                self._out_rtp_recv[ts]         = 0
                 log.info('IPSC call start: src=%d  tg=%d  ts=%d  stream=%s  int_seq_id=0x%02x',
                          int.from_bytes(src_sub, 'big'), int.from_bytes(dst_group, 'big'),
                          ts, self._out_stream_id[ts].hex(), ipsc_stream_id)
@@ -486,6 +499,8 @@ class CallTranslator:
                 self._out_emb_lc[ts]         = bptc.encode_emblc(lc)
                 self._out_last_ambe[ts]      = None
                 self._out_rssi[ts]           = []
+                self._out_rtp_first[ts]        = None
+                self._out_rtp_recv[ts]         = 0
                 self._out_frame_pos[ts]      = 4  # Burst E is superframe position 4
                 log.info('IPSC late entry: ts=%d src=%d tg=%d — LC from GVCU Burst E, stream=%s  int_seq_id=0x%02x',
                          ts, int.from_bytes(src_sub, 'big'), int.from_bytes(dst_group, 'big'),
@@ -506,6 +521,8 @@ class CallTranslator:
             self._out_last_ambe[ts] = (a1_72, a2_72, a3_72)
             flags, payload_33 = self._out_voice_frame(ts, flags, a1_72, a2_72, a3_72)
 
+        self._out_seq_track(ts, data)
+
         # Forward under the LOCKED call identity (from _out_lc), never the per-frame
         # header — on a Talker Alias superframe the header src/dst are alias bytes.
         locked_lc = self._out_lc[ts] if self._out_lc[ts] else (LC_OPT + dst_group + src_sub)
@@ -520,17 +537,17 @@ class CallTranslator:
             + bytes([flags])
             + self._out_stream_id[ts]
             + payload_33
-            + b'\x00'       # BER (not reported over IPSC)
+            + bytes([self._out_loss_code(ts)])   # BER byte: running loss code (see below)
             + bytes([self._out_rssi_byte(ts)])
         )
         self._out_seq = (self._out_seq + 1) & 0xFF
         self._hbp.send_dmrd(dmrd)
 
         if burst_type == VOICE_TERM:
-            log.info('IPSC call end:   src=%d  tg=%d  ts=%d  stream=%s  int_seq_id=0x%02x%s',
+            log.info('IPSC call end:   src=%d  tg=%d  ts=%d  stream=%s  int_seq_id=0x%02x  loss=%s%s',
                      int.from_bytes(out_src, 'big'), int.from_bytes(out_dst, 'big'), ts,
                      self._out_stream_id[ts].hex(), self._out_ipsc_stream_id[ts],
-                     self._out_rssi_summary(ts))
+                     self._out_loss_pct(ts), self._out_rssi_summary(ts))
             self._reset_out_call(ts)
 
     def _out_voice_frame(self, ts: int, flags: int, a1_72, a2_72, a3_72):
@@ -543,6 +560,39 @@ class CallTranslator:
         flags |= HBPF_FRAMETYPE_VOICESYNC if pos == 0 else (HBPF_FRAMETYPE_VOICE | pos)
         self._out_frame_pos[ts] += 1
         return flags, frame_bits.tobytes()
+
+    def _out_seq_track(self, ts: int, data: bytes):
+        """Count an IPSC packet of the active out-call by its RTP sequence number."""
+        if len(data) < 22:
+            return
+        seq = struct.unpack('>H', data[20:22])[0]
+        if self._out_rtp_first[ts] is None:
+            self._out_rtp_first[ts] = seq
+            self._out_rtp_max[ts]   = seq
+        else:
+            d = (seq - (self._out_rtp_max[ts] & 0xFFFF)) & 0xFFFF
+            if d == 0:
+                return                                  # duplicate
+            if d < 0x8000:
+                self._out_rtp_max[ts] += d              # forward (unwrapped)
+            # else: late / reordered packet -- counts as received, not as progress
+        self._out_rtp_recv[ts] += 1
+
+    def _out_loss_code(self, ts: int) -> int:
+        """Running packet loss of the out-call, carried in the DMRD BER byte (a private
+        convention between ipsc2hbp and our hblink3 fork, enabled there per system with
+        LOSS_IN_BER): 0 = not measured, else 1 + 10 x percent (0.1 % steps), capped at
+        255 (= 25.4 % or more). Measured from the repeater's own RTP sequence numbers,
+        so it counts real packet loss on the repeater -> us leg, not delay."""
+        if not self._out_rtp_recv[ts]:
+            return 0
+        expected = self._out_rtp_max[ts] - self._out_rtp_first[ts] + 1
+        lost = max(0, expected - self._out_rtp_recv[ts])
+        return min(255, 1 + round(1000.0 * lost / expected))
+
+    def _out_loss_pct(self, ts: int) -> str:
+        code = self._out_loss_code(ts)
+        return '%.1f%%' % ((code - 1) / 10.0) if code else 'n/a'
 
     def _out_rssi_byte(self, ts: int) -> int:
         """HBP DMRD RSSI byte (MMDVM convention: -dBm as an unsigned byte; 0 = none)."""
