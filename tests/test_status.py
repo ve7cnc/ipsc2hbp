@@ -144,8 +144,16 @@ class TestStatusFile(_TmpDir):
         proto.datagram_received(bytes([DE_REG_REQ]) + REPEATER.to_bytes(4, 'big'), (PEER_IP, 50001))
         self.assertEqual(self.read()['peers'], [])
 
+    def test_the_directory_is_made(self):
+        path = os.path.join(self.dir.name, 'peers', 'rep.json')
+        proto = _master(_cfg(status_file=path))
+        StatusWriter(proto._cfg, proto).write()
+        self.assertTrue(os.path.exists(path))
+
     def test_a_write_failure_never_raises(self):
-        proto = _master(_cfg(status_file=os.path.join(self.dir.name, 'no', 'such', 'dir.json')))
+        blocker = os.path.join(self.dir.name, 'a-file')
+        open(blocker, 'w').close()                     # a directory that cannot be made
+        proto = _master(_cfg(status_file=os.path.join(blocker, 'status.json')))
         StatusWriter(proto._cfg, proto)
         with self.assertLogs('ipsc.status', level='WARNING'):
             proto.datagram_received(_reg(), (PEER_IP, 50001))     # still registers

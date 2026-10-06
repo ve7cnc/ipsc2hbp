@@ -69,6 +69,7 @@ class StatusWriter:
         try:
             data = json.dumps(self.snapshot(), indent=1, sort_keys=True) + '\n'
             directory = os.path.dirname(os.path.abspath(self._path))
+            os.makedirs(directory, exist_ok=True)
             fd, tmp = tempfile.mkstemp(prefix='.status-', dir=directory)
             try:
                 with os.fdopen(fd, 'w') as fh:
