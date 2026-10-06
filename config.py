@@ -63,6 +63,10 @@ class Config:
     software_id: str
     package_id: str
 
+    # [global] — peer status file (off when empty; see ipsc/status.py)
+    status_file: str = ''
+    status_interval: int = 10
+
 
 def load(path: str) -> Config:
     """Load and validate a TOML config file. Raises on any error."""
@@ -121,6 +125,9 @@ def load(path: str) -> Config:
 
     # [global]
     log_level = get_str('global', 'log_level', choices=_VALID_LOG_LEVELS)
+    # Peer status file: empty (the default) = write nothing, exactly as upstream.
+    status_file = get_str('global', 'status_file', required=False, default='')
+    status_interval = max(1, get_int('global', 'status_interval', required=False, default=10))
 
     # [ipsc]
     ipsc_bind_ip   = get_str('ipsc', 'bind_ip')
@@ -369,4 +376,6 @@ def load(path: str) -> Config:
         url=url,
         software_id=software_id,
         package_id=package_id,
+        status_file=status_file,
+        status_interval=status_interval,
     )

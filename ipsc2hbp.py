@@ -90,6 +90,12 @@ def main():
     hbp_client = HBPClient(cfg, translator)
     translator.set_protocols(ipsc_proto, hbp_client)
 
+    # Peer status file ([global] status_file): off unless configured.
+    status_writer = None
+    if cfg.status_file:
+        from ipsc.status import StatusWriter
+        status_writer = StatusWriter(cfg, ipsc_proto)
+
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
 
@@ -114,6 +120,8 @@ def main():
         else:
             log.info('IPSC peer socket bound — %s:%d', cfg.ipsc_bind_ip, cfg.ipsc_bind_port)
         hbp_client.start(loop)
+        if status_writer is not None:
+            status_writer.start(loop)
         loop.run_forever()
     except OSError as exc:
         sys.exit(f'Failed to bind IPSC socket: {exc}')
