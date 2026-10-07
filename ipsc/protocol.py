@@ -229,11 +229,13 @@ class IPSCMasterProtocol(asyncio.DatagramProtocol):
 
         was_empty = len(self._peers) == 0
 
+        since = self._peers[peer_id].get('since') if not is_new_peer else None
         self._peers[peer_id] = {
             'ip':      host,
             'port':    port,
             'mode':    peer_mode,
             'last_ka': time(),
+            'since':   since or time(),     # registered since (status file only)
         }
 
         # MASTER_REG_REPLY: 0x91 + master_id(4) + ts_flags(5) + num_peers(2) + IPSC_VER(4)
@@ -367,6 +369,7 @@ class IPSCMasterProtocol(asyncio.DatagramProtocol):
             'ip_present': bool(p.get('ip')),
             'mode': p['mode'].hex() if isinstance(p.get('mode'), bytes) else None,
             'last_keepalive': iso(p.get('last_ka')),
+            'connected_since': iso(p.get('since')),
             'state': ('connected' if now - p.get('last_ka', 0) <= self._cfg.keepalive_watchdog
                       else 'not_connected'),
         } for pid, p in sorted(self._peers.items())]
@@ -505,6 +508,7 @@ class IPSCPeerProtocol(asyncio.DatagramProtocol):
         # MASTER_REG_REPLY) and when it last answered.
         self._master_peer_id = None
         self._master_last = None
+        self._master_since = None
         self.on_status_change = None    # set by ipsc/status.StatusWriter, else unused
         self._voice_src = {}   # {ts: {'src': peerid, 't': time}} — active-call source lock
         self._peer_reg_req_pkt     = bytes([PEER_REG_REQ])     + self._our_id + config.ipsc_version
@@ -630,6 +634,7 @@ class IPSCPeerProtocol(asyncio.DatagramProtocol):
         # Notify translator on first connection or re-connection after watchdog
         if not self._connected:
             self._connected = True
+            self._master_since = time()
             self._translator.peer_joined()
             self._status_changed()
 
@@ -707,6 +712,7 @@ class IPSCPeerProtocol(asyncio.DatagramProtocol):
             p['last_ka'] = time()
         if p and not p['connected']:
             p['connected'], p['outstanding'] = True, 0
+            p['since'] = time()
             log.info('IPSC peer: mesh peer %d CONNECTED (%s:%d)',
                      int.from_bytes(peerid, 'big'), p['ip'], p['port'])
             self._status_changed()
@@ -738,6 +744,7 @@ class IPSCPeerProtocol(asyncio.DatagramProtocol):
                           int.from_bytes(pid, 'big'), p['ip'], p['port'])
             elif p['outstanding'] >= self._cfg.keepalive_missed_max:
                 p['connected'], p['outstanding'] = False, 0
+                p['since'] = None
                 log.warning('IPSC peer: mesh peer %d unresponsive — re-registering',
                             int.from_bytes(pid, 'big'))
                 self._status_changed()
@@ -824,6 +831,7 @@ class IPSCPeerProtocol(asyncio.DatagramProtocol):
         was_connected  = self._connected
         self._connected = False
         self._state     = self._IDLE
+        self._master_since = None
         if was_connected:
             self._translator.peer_lost()
             self._status_changed()
@@ -912,6 +920,7 @@ class IPSCPeerProtocol(asyncio.DatagramProtocol):
             'ip_present': bool(self._cfg.ipsc_master_ip),
             'mode': None,
             'last_keepalive': iso(self._master_last),
+            'connected_since': iso(self._master_since) if master_up else None,
             'state': 'connected' if master_up else 'not_connected',
         }]
         for pid, p in sorted(self._mesh.items()):
@@ -921,6 +930,7 @@ class IPSCPeerProtocol(asyncio.DatagramProtocol):
                 'ip_present': bool(p.get('ip')),
                 'mode': p['mode'].hex() if isinstance(p.get('mode'), bytes) else None,
                 'last_keepalive': iso(p.get('last_ka')),
+                'connected_since': iso(p.get('since')) if master_up and p.get('connected') else None,
                 'state': 'connected' if master_up and p.get('connected') else 'not_connected',
             })
         return out

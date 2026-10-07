@@ -195,7 +195,10 @@ class TestPeerMode(_TmpDir):
                                 ('198.51.100.20', 50000))
         states = {p['peer_id']: p['state'] for p in self.read()['peers']}
         self.assertEqual(states[302025], 'connected')
-        self.assertIsNotNone(next(p for p in self.read()['peers'] if p['peer_id'] == 302025)['last_keepalive'])
+        sq = next(p for p in self.read()['peers'] if p['peer_id'] == 302025)
+        self.assertIsNotNone(sq['last_keepalive'])
+        self.assertIsNotNone(sq['connected_since'])     # up since, for "up 5h"
+        self.assertIsNotNone(self.read()['peers'][0]['connected_since'])   # the master link
         self.assertNotIn('198.51.100', json.dumps(self.read()))
 
     def test_a_slave_that_stops_answering_drops_with_the_protocols_own_rule(self):
