@@ -248,6 +248,19 @@ class TestWireUntouched(_TmpDir):
         self.assertEqual(strip(off_hbp), strip(on_hbp))
 
 
+class TestCallLogNamesThePeer(_TmpDir):
+    """Which repeater in the IPSC heard a call, for the monitor: in the log only."""
+
+    def test_call_start_and_end_say_which_peer(self):
+        with self.assertLogs('translate.translator', level='INFO') as logs:
+            TestWireUntouched._run(self, status=False)
+        start = [l for l in logs.output if 'IPSC call start' in l]
+        end = [l for l in logs.output if 'IPSC call end:' in l]
+        self.assertTrue(start and end)
+        self.assertIn(f'peer={REPEATER}', start[0])
+        self.assertIn(f'peer={REPEATER}', end[0])
+
+
 def _with_peer(pkt: bytes) -> bytes:
     """The synthetic GROUP_VOICE, from our registered peer."""
     return pkt[:1] + REPEATER.to_bytes(4, 'big') + pkt[5:]

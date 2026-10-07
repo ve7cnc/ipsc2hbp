@@ -199,6 +199,9 @@ class CallTranslator:
         self._out_emb_lc         = {1: None, 2: None}  # dict {1–4: bitarray(32)} embedded LC
         self._out_last_ambe      = {1: None, 2: None}  # (a1, a2, a3) 72-bit AMBE of last voice burst
         self._out_rssi           = {1: [],   2: []}    # dBm readings from VOICE_RSSI, this call
+        # The IPSC peer (repeater) the call came from, for the log only: with slaves in
+        # the IPSC it says which one heard it. Never put on the wire.
+        self._out_peer           = {1: 0,    2: 0}
         # Packet loss on the repeater -> us leg, from the repeater's IPSC RTP sequence
         # numbers (bytes 20-21, +1 per packet in the stream): first and highest
         # (unwrapped) seen, and how many arrived. See _out_loss_code.
@@ -411,9 +414,10 @@ class CallTranslator:
                 self._out_rssi[ts]           = []
                 self._out_rtp_first[ts]        = None
                 self._out_rtp_recv[ts]         = 0
-                log.info('IPSC call start: src=%d  tg=%d  ts=%d  stream=%s  int_seq_id=0x%02x',
+                self._out_peer[ts]             = int.from_bytes(data[1:5], 'big')
+                log.info('IPSC call start: src=%d  tg=%d  ts=%d  stream=%s  int_seq_id=0x%02x  peer=%d',
                          int.from_bytes(src_sub, 'big'), int.from_bytes(dst_group, 'big'),
-                         ts, self._out_stream_id[ts].hex(), ipsc_stream_id)
+                         ts, self._out_stream_id[ts].hex(), ipsc_stream_id, self._out_peer[ts])
             else:
                 # Motorola radios fire VOICE_HEAD twice at call start — once on LC
                 # detection, once confirmed. MMDVMHost absorbs this at the driver
@@ -502,9 +506,10 @@ class CallTranslator:
                 self._out_rtp_first[ts]        = None
                 self._out_rtp_recv[ts]         = 0
                 self._out_frame_pos[ts]      = 4  # Burst E is superframe position 4
-                log.info('IPSC late entry: ts=%d src=%d tg=%d — LC from GVCU Burst E, stream=%s  int_seq_id=0x%02x',
+                self._out_peer[ts]           = int.from_bytes(data[1:5], 'big')
+                log.info('IPSC late entry: ts=%d src=%d tg=%d — LC from GVCU Burst E, stream=%s  int_seq_id=0x%02x  peer=%d',
                          ts, int.from_bytes(src_sub, 'big'), int.from_bytes(dst_group, 'big'),
-                         self._out_stream_id[ts].hex(), ipsc_stream_id)
+                         self._out_stream_id[ts].hex(), ipsc_stream_id, self._out_peer[ts])
             # Continuation: the per-frame header src/dst and call-seq are ignored
             # (they may be alias bytes on a TA superframe). All AMBE is forwarded
             # under the locked identity / stream ID established at call start.
@@ -544,10 +549,10 @@ class CallTranslator:
         self._hbp.send_dmrd(dmrd)
 
         if burst_type == VOICE_TERM:
-            log.info('IPSC call end:   src=%d  tg=%d  ts=%d  stream=%s  int_seq_id=0x%02x  loss=%s%s',
+            log.info('IPSC call end:   src=%d  tg=%d  ts=%d  stream=%s  int_seq_id=0x%02x  peer=%d  loss=%s%s',
                      int.from_bytes(out_src, 'big'), int.from_bytes(out_dst, 'big'), ts,
                      self._out_stream_id[ts].hex(), self._out_ipsc_stream_id[ts],
-                     self._out_loss_pct(ts), self._out_rssi_summary(ts))
+                     self._out_peer[ts], self._out_loss_pct(ts), self._out_rssi_summary(ts))
             self._reset_out_call(ts)
 
     def _out_voice_frame(self, ts: int, flags: int, a1_72, a2_72, a3_72):
