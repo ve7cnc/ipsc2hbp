@@ -215,6 +215,35 @@ class TestPeerMode(_TmpDir):
         self.assertEqual({p['state'] for p in self.read()['peers']}, {'not_connected'})
 
 
+class TestMeshPeerBehindNat(TestPeerMode):
+    """Squamish (302025) is listed by the master at the port its NAT uses toward the
+    master; it reaches us from another. That one is the one that works."""
+
+    def test_a_peer_is_reached_where_it_talks_from(self):
+        from ipsc.const import PEER_ALIVE_REQ, PEER_REG_REQ
+        proto = self._peer()
+        self._register(proto)                       # listed at 198.51.100.20:50000
+        nat = ('198.51.100.20', 9612)
+        proto.datagram_received(bytes([PEER_ALIVE_REQ]) + (302025).to_bytes(4, 'big') + b'\x6a\x00\x00\x00\x0d', nat)
+        proto._transport.sent.clear()
+        proto._service_mesh_peers()
+        reg = [a for d, a in proto._transport.sent if d[0] == PEER_REG_REQ]
+        self.assertIn(nat, reg)                     # registration goes where it works
+        proto.datagram_received(bytes([PEER_REG_REPLY]) + (302025).to_bytes(4, 'big') + b'\x04\x02\x04\x01', nat)
+        self.assertEqual({p['peer_id']: p['state'] for p in self.read()['peers']}[302025], 'connected')
+        # The master's next peer list still says :50000: the learned port stays.
+        self._register(proto)
+        self.assertEqual(proto._mesh[(302025).to_bytes(4, 'big')]['port'], 9612)
+
+    def test_a_peer_that_moves_to_another_ip_follows_the_list(self):
+        proto = self._peer()
+        self._register(proto)
+        pid = (302025).to_bytes(4, 'big')
+        proto._mesh[pid].update(ip='203.0.113.9', port=7, learned=True)
+        self._register(proto)                       # listed elsewhere: believe the list
+        self.assertEqual((proto._mesh[pid]['ip'], proto._mesh[pid]['port']), ('198.51.100.20', 50000))
+
+
 class TestWireUntouched(_TmpDir):
     """The fork adds one writer and nothing else: what ipsc2hbp sends either way is the same."""
 

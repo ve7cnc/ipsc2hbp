@@ -580,13 +580,13 @@ class IPSCPeerProtocol(asyncio.DatagramProtocol):
             self._on_peer_reg_req(peerid, host, port)
             return
         if opcode == PEER_REG_REPLY:
-            self._on_peer_reg_reply(peerid)
+            self._on_peer_reg_reply(peerid, host, port)
             return
         if opcode == PEER_ALIVE_REQ:
             self._on_peer_alive_req(peerid, host, port)
             return
         if opcode == PEER_ALIVE_REPLY:
-            self._on_peer_alive_reply(peerid)
+            self._on_peer_alive_reply(peerid, host, port)
             return
 
         # Master management (only meaningful from the master).
@@ -655,7 +655,12 @@ class IPSCPeerProtocol(asyncio.DatagramProtocol):
             mode  = entry[10:11]
             seen.add(pid)
             if pid in self._mesh:
-                self._mesh[pid].update(ip=ip, port=pport, mode=mode)
+                p = self._mesh[pid]
+                p['mode'] = mode
+                # A peer behind NAT is listed at the port its NAT uses toward the master;
+                # the one it reaches us from (learned by _heard_from) is the one that works.
+                if not (p.get('learned') and p['ip'] == ip):
+                    p.update(ip=ip, port=pport, learned=False)
             else:
                 self._mesh[pid] = {'ip': ip, 'port': pport, 'mode': mode,
                                    'connected': False, 'outstanding': 0}
@@ -675,16 +680,28 @@ class IPSCPeerProtocol(asyncio.DatagramProtocol):
     # Full-mesh peer-to-peer handlers (§ IPSC mesh; mirrors DMRlink3)
     # ------------------------------------------------------------------
 
+    def _heard_from(self, peerid: bytes, host: str, port: int):
+        """A mesh peer sent us something: where it sent it from is its real address. A
+        peer behind NAT is reachable only there (its NAT maps a different port toward
+        each destination, so the master's peer list has the wrong one for us)."""
+        p = self._mesh.get(peerid)
+        if p and (p['ip'], p['port']) != (host, port):
+            log.info('IPSC peer: mesh peer %d is at %s:%d (was %s:%d)',
+                     int.from_bytes(peerid, 'big'), host, port, p['ip'], p['port'])
+            p['ip'], p['port'] = host, port
+        if p:
+            p['learned'] = True
+
     def _on_peer_reg_req(self, peerid: bytes, host: str, port: int):
         """Another peer is registering with us — reply so it marks us CONNECTED."""
         self._send(self._peer_reg_reply_pkt, host, port)
-        p = self._mesh.get(peerid)
-        if p:
-            p['ip'], p['port'] = host, port
+        self._heard_from(peerid, host, port)
         log.debug('IPSC peer: PEER_REG_REQ from %d at %s:%d — replied',
                   int.from_bytes(peerid, 'big'), host, port)
 
-    def _on_peer_reg_reply(self, peerid: bytes):
+    def _on_peer_reg_reply(self, peerid: bytes, host: str = None, port: int = None):
+        if host is not None:
+            self._heard_from(peerid, host, port)
         p = self._mesh.get(peerid)
         if p:
             p['last_ka'] = time()
@@ -696,12 +713,15 @@ class IPSCPeerProtocol(asyncio.DatagramProtocol):
 
     def _on_peer_alive_req(self, peerid: bytes, host: str, port: int):
         self._send(self._peer_alive_reply_pkt, host, port)
+        self._heard_from(peerid, host, port)
         p = self._mesh.get(peerid)
         if p:
             p['outstanding'] = 0
             p['last_ka'] = time()
 
-    def _on_peer_alive_reply(self, peerid: bytes):
+    def _on_peer_alive_reply(self, peerid: bytes, host: str = None, port: int = None):
+        if host is not None:
+            self._heard_from(peerid, host, port)
         p = self._mesh.get(peerid)
         if p:
             p['outstanding'] = 0
