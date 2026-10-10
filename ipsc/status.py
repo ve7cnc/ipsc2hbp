@@ -62,7 +62,18 @@ class StatusWriter:
             'hbp_repeater_id': self._cfg.hbp_repeater_id,
             'interval': self._interval,
             'peers': self._proto.status_peers(),
+            **self._xnl(),
         }
+
+    def _xnl(self) -> dict:
+        link = getattr(self._proto, 'xnl', None)
+        if link is None:
+            return {}
+        d = link.status.as_dict()
+        for k in ('rssi_at', 'connected_since'):
+            if k in d:
+                d[k] = iso(d[k])
+        return {'xnl': d}
 
     def write(self) -> None:
         """Write the snapshot now. Never raises: a status file is not worth a translator."""

@@ -24,6 +24,7 @@ from time import time
 
 from config import Config
 from ipsc import callmon
+from ipsc.xnl import XnlLink
 from ipsc.const import (
     MASTER_REG_REQ, MASTER_REG_REPLY,
     PEER_LIST_REQ, PEER_LIST_REPLY,
@@ -111,6 +112,10 @@ class IPSCMasterProtocol(asyncio.DatagramProtocol):
         # None otherwise, and then nothing below calls anything.
         self.on_status_change = None
 
+        # [xnl]: the read-only XNL status client, talking to the registered repeater.
+        self.xnl = (XnlLink(config, translator, self._send, self._repeater_addr)
+                    if config.xnl_constants is not None else None)
+
     # ------------------------------------------------------------------
     # asyncio protocol interface
     # ------------------------------------------------------------------
@@ -120,6 +125,8 @@ class IPSCMasterProtocol(asyncio.DatagramProtocol):
         log.info('IPSC master listening — %s:%d  (max %d peers)',
                  self._cfg.ipsc_bind_ip, self._cfg.ipsc_bind_port, _MAX_PEERS)
         self._watchdog_task = asyncio.get_running_loop().create_task(self._watchdog_loop())
+        if self.xnl is not None:
+            self.xnl.start(asyncio.get_running_loop())
 
     def connection_lost(self, exc):
         if self._watchdog_task:
@@ -144,9 +151,12 @@ class IPSCMasterProtocol(asyncio.DatagramProtocol):
 
         opcode = data[0]
 
-        # XNL/XCMP: never process, log only at DEBUG
+        # XNL/XCMP: only the read-only status client ([xnl]) handles it.
         if opcode == XCMP_XNL:
-            log.debug('XCMP/XNL received from %s:%d — ignored', host, port)
+            if self.xnl is not None:
+                self.xnl.received(data, host)
+            else:
+                log.debug('XCMP/XNL received from %s:%d — ignored', host, port)
             return
 
         # Any packet from a registered peer proves it is still alive; reset
@@ -355,6 +365,11 @@ class IPSCMasterProtocol(asyncio.DatagramProtocol):
             self._translator.peer_lost()
         self._status_changed()
 
+    def _repeater_addr(self):
+        """The repeater this instance serves, while registered: (host, port) or None."""
+        p = self._peers.get(self._cfg.hbp_repeater_id.to_bytes(4, 'big'))
+        return (p['ip'], p['port']) if p else None
+
     # ------------------------------------------------------------------
     # Status (ipsc/status.py)
     # ------------------------------------------------------------------
@@ -514,6 +529,9 @@ class IPSCPeerProtocol(asyncio.DatagramProtocol):
         self._master_last = None
         self._master_since = None
         self.on_status_change = None    # set by ipsc/status.StatusWriter, else unused
+        # [xnl]: the read-only XNL status client, talking to the master (the repeater).
+        self.xnl = (XnlLink(config, translator, self._send, self._repeater_addr)
+                    if config.xnl_constants is not None else None)
         self._voice_src = {}   # {ts: {'src': peerid, 't': time}} — active-call source lock
         self._peer_reg_req_pkt     = bytes([PEER_REG_REQ])     + self._our_id + config.ipsc_version
         self._peer_reg_reply_pkt   = bytes([PEER_REG_REPLY])   + self._our_id + config.ipsc_version
@@ -532,6 +550,8 @@ class IPSCPeerProtocol(asyncio.DatagramProtocol):
         self._keepalive_task = asyncio.get_running_loop().create_task(
             self._registration_and_keepalive()
         )
+        if self.xnl is not None:
+            self.xnl.start(asyncio.get_running_loop())
 
     def connection_lost(self, exc):
         if self._keepalive_task:
@@ -572,7 +592,10 @@ class IPSCPeerProtocol(asyncio.DatagramProtocol):
             return
 
         if opcode == XCMP_XNL:
-            log.debug('XCMP/XNL from %s:%d — ignored', host, port)
+            if self.xnl is not None and from_master:
+                self.xnl.received(data, host)
+            else:
+                log.debug('XCMP/XNL from %s:%d — ignored', host, port)
             return
 
         # User traffic — accepted from the master OR any peer.
@@ -902,6 +925,15 @@ class IPSCPeerProtocol(asyncio.DatagramProtocol):
     # ------------------------------------------------------------------
     # Public interface (matches IPSCMasterProtocol)
     # ------------------------------------------------------------------
+
+    def _repeater_addr(self):
+        """The master, while we are registered and it is the repeater this instance
+        serves: (host, port) or None."""
+        if not (self._connected and self._state in (self._REGISTERED, self._ACTIVE)):
+            return None
+        if self._master_peer_id not in (None, self._cfg.hbp_repeater_id):
+            return None
+        return self._master_addr
 
     def stop(self):
         """Send DE_REG_REQ to the master for a clean shutdown."""

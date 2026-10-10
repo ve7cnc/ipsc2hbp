@@ -599,6 +599,18 @@ class CallTranslator:
         code = self._out_loss_code(ts)
         return '%.1f%%' % ((code - 1) / 10.0) if code else 'n/a'
 
+    def ipsc_call_up(self) -> bool:
+        """A call from the repeater (IPSC → HBP) is in progress on either slot."""
+        return any(self._out_stream_id[ts] is not None for ts in (1, 2))
+
+    def xnl_rssi(self, slot1: float, slot2: float):
+        """RSSI polled over XNL (ipsc/xnl.py): both slots at once; kept for each slot
+        with a call up, exactly like a 0x24 report."""
+        for ts, dbm in ((1, slot1), (2, slot2)):
+            if self._out_stream_id[ts] is not None:
+                self._out_rssi[ts].append(dbm)
+                log.debug('← XNL ts=%d  RSSI %.2f dBm', ts, dbm)
+
     def _out_rssi_byte(self, ts: int) -> int:
         """HBP DMRD RSSI byte (MMDVM convention: -dBm as an unsigned byte; 0 = none)."""
         if not self._out_rssi[ts]:

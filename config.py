@@ -67,6 +67,11 @@ class Config:
     status_file: str = ''
     status_interval: int = 10
 
+    # [xnl] — read-only XNL/XCMP status client (RSSI, ID, alias); off unless enabled
+    # with Motorola's constants. ipsc/xnl.py.
+    xnl_enabled: bool = False
+    xnl_constants: tuple = None   # (delta, k0, k1, k2, k3) or None
+
 
 def load(path: str) -> Config:
     """Load and validate a TOML config file. Raises on any error."""
@@ -128,6 +133,18 @@ def load(path: str) -> Config:
     # Peer status file: empty (the default) = write nothing, exactly as upstream.
     status_file = get_str('global', 'status_file', required=False, default='')
     status_interval = max(1, get_int('global', 'status_interval', required=False, default=10))
+
+    # [xnl]
+    xnl_enabled = get_bool('xnl', 'enabled', required=False, default=False)
+    xnl_constants = None
+    if xnl_enabled:
+        from ipsc.xnl import parse_constants
+        raw_k = get_str('xnl', 'auth_constants', required=False, default='')
+        xnl_constants = parse_constants(raw_k) if raw_k and 'CHANGEME' not in raw_k else None
+        if raw_k and xnl_constants is None and 'CHANGEME' not in raw_k:
+            errors.append('[xnl] auth_constants: five 32-bit hex words (delta k0 k1 k2 k3)')
+    # Claim to be an XNL slave only when we can actually log in.
+    xnl_on = xnl_constants is not None
 
     # [ipsc]
     ipsc_bind_ip   = get_str('ipsc', 'bind_ip')
@@ -209,6 +226,8 @@ def load(path: str) -> Config:
             _flags_b4 |= 0x01                 # MSTR_PEER — only set when acting as master
         if auth_enabled:
             _flags_b4 |= 0x10                 # PKT_AUTH
+        if xnl_on:
+            _flags_b4 |= 0x20                 # XNL_SLAVE — we log in to the repeater's XNL
         ipsc_flags_bytes = b'\x00\x00\x00' + bytes([_flags_b4])
         ipsc_version     = b'\x04\x02\x04\x01'
     else:
@@ -285,7 +304,7 @@ def load(path: str) -> Config:
         b3 = 0x01 if ipsc_mode == 'MASTER' else 0x00   # MSTR_PEER reflects actual role
         if _cap_bool('xnl_con'):    b3 |= 0x80
         if _cap_bool('xnl_master'): b3 |= 0x40
-        if _cap_bool('xnl_slave'):  b3 |= 0x20
+        if _cap_bool('xnl_slave') or xnl_on: b3 |= 0x20
         if auth_enabled:            b3 |= 0x10  # AUTH always mirrors auth_enabled
         if _cap_bool('data'):       b3 |= 0x08
         if _cap_bool('voice', default=True): b3 |= 0x04
@@ -378,4 +397,6 @@ def load(path: str) -> Config:
         package_id=package_id,
         status_file=status_file,
         status_interval=status_interval,
+        xnl_enabled=xnl_enabled,
+        xnl_constants=xnl_constants,
     )
