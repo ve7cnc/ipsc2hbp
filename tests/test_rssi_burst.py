@@ -31,6 +31,12 @@ _RSSI_PKT = bytes.fromhex(
 # or the translator (correctly) reads the jump as a new call.
 _RSSI_PKT = _RSSI_PKT[:22] + b'\x00' * 4 + _RSSI_PKT[26:]
 
+# The same report from an SLR5700 (VE7NWR, 2026-10-10, same caller and talkgroup):
+# bytes 38–39 = 0x7af4 in 8.8 fixed point → -122.95 dBm (a portable 30 km out).
+_SLR_RSSI_PKT = bytes.fromhex(
+    '8000049e6c392e308b0192730200000dd420805d970e51eabe590000000024800003c00000007af4')
+_SLR_RSSI_PKT = _SLR_RSSI_PKT[:22] + b'\x00' * 4 + _SLR_RSSI_PKT[26:]
+
 _SRC_SUB   = _RSSI_PKT[6:9]
 _DST_GROUP = _RSSI_PKT[9:12]
 
@@ -109,6 +115,14 @@ class TestVoiceRssi(unittest.TestCase):
         self.assertEqual(self.hbp.sent[-1][54], 99)   # -98.52 dBm
         self.tr.ipsc_voice_received(_ipsc_gv(SLOT2_VOICE), 2, SLOT2_VOICE)
         self.assertEqual(self.hbp.sent[-1][54], 99, 'latest reading carries forward')
+
+    def test_slr_rssi_is_8_8_fixed_point(self):
+        self._start_call_through_e()
+        self.tr.ipsc_voice_received(_SLR_RSSI_PKT, 2, VOICE_RSSI)
+        self.assertEqual(self.hbp.sent[-1][54], 123)  # -122.95 dBm, not -314.76
+        with self.assertLogs('translate.translator', level='INFO') as cm:
+            self.tr.ipsc_voice_received(_ipsc_gv(VOICE_TERM), 2, VOICE_TERM)
+        self.assertTrue(any('rssi=-123.0 dBm' in m for m in cm.output), cm.output)
 
     def test_rssi_without_call_is_ignored(self):
         self.tr.ipsc_voice_received(_RSSI_PKT, 2, VOICE_RSSI)

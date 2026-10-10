@@ -23,6 +23,7 @@ from hashlib import sha1
 from time import time
 
 from config import Config
+from ipsc import callmon
 from ipsc.const import (
     MASTER_REG_REQ, MASTER_REG_REPLY,
     PEER_LIST_REQ, PEER_LIST_REPLY,
@@ -32,6 +33,7 @@ from ipsc.const import (
     DE_REG_REQ, DE_REG_REPLY, OPCODE_0xF0,
     GROUP_VOICE, PVT_VOICE, GROUP_DATA, PVT_DATA,
     REPEATER_BLOCKED, CALL_INTERRUPT_REQ, XCMP_XNL,
+    CALL_MON_STATUS, CALL_MON_RPT,
     SYSTEM_MAP_REQ, SYSTEM_MAP_REPLY,
     VOICE_HEAD, VOICE_TERM, SLOT1_VOICE, SLOT2_VOICE,
     TS_CALL_MSK,
@@ -175,6 +177,8 @@ class IPSCMasterProtocol(asyncio.DatagramProtocol):
             log.debug('CALL_INTERRUPT_REQ from %s:%d', host, port)
         elif opcode == OPCODE_0xF0:
             log.debug('0xF0 from %s:%d — observed, benign, no response sent', host, port)
+        elif opcode in (CALL_MON_STATUS, CALL_MON_RPT):
+            log.info('%s', callmon.describe(data))
         elif opcode in _KNOWN_UNHANDLED:
             log.debug('%s (0x%02x) from %s:%d — received, not handled',
                       _KNOWN_UNHANDLED[opcode], opcode, host, port)
@@ -606,6 +610,8 @@ class IPSCPeerProtocol(asyncio.DatagramProtocol):
         elif opcode == SYSTEM_MAP_REQ:
             log.info('SYSTEM_MAP_REQ (0x9C) from master %s:%d len=%d raw=%s',
                      host, port, len(data), data.hex())
+        elif opcode in (CALL_MON_STATUS, CALL_MON_RPT):
+            log.info('%s', callmon.describe(data))
         elif opcode in _PEER_KNOWN_UNHANDLED:
             log.debug('%s (0x%02x) from %s:%d — received, not handled',
                       _PEER_KNOWN_UNHANDLED[opcode], opcode, host, port)

@@ -53,10 +53,17 @@ SLOT2_VOICE = 0x8A   # Voice burst on Timeslot 2 (bit 7 set)
 # superframe IN PLACE OF voice burst F: it takes that burst's RTP timestamp slot and
 # no burst-F voice packet is sent for that superframe. 40 bytes (+ auth):
 #   bytes 30–37: 24 c0 00 03 c0 00 00 00 (constant in all captures so far)
-#   bytes 38–39: RSSI, big-endian uint16, hundredths of a dB below 0 dBm
-#                (0x267c = 9852 → -98.52 dBm; confirmed against c-Bridge readings)
+#   bytes 38–39: RSSI, big-endian uint16, dB below 0 dBm, in one of two encodings:
+#     XPR8400: hundredths of a dB (0x267c = 9852 → -98.52 dBm; confirmed against
+#              c-Bridge readings)
+#     SLR5700: 8.8 fixed point, dB × 256 (0x7af4 → -122.95 dBm), the encoding its
+#              XCMP RSSI replies to the c-Bridge use too (0x6c6e → -108.4 dBm)
+#   The two only overlap for an SLR reading stronger than about -55 dBm, and the SLR
+#   sends these only for weak signals, so the value picks the encoding: a raw value
+#   of GV_RSSI_Q88_MIN or more (-140 dBm in hundredths) is 8.8.
 VOICE_RSSI  = 0x24
 GV_RSSI_OFF = 38     # bytes 38–39 of a VOICE_RSSI packet
+GV_RSSI_Q88_MIN = 14000
 
 # ---------------------------------------------------------------------------
 # IPSC version field — 4 bytes sent in all registration and keepalive packets.

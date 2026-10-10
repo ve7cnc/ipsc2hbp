@@ -52,7 +52,7 @@ from config import Config
 from translate.const import MAX_SYNTH_BURSTS
 from ipsc.const import (
     GROUP_VOICE,
-    VOICE_HEAD, VOICE_TERM, SLOT1_VOICE, SLOT2_VOICE, VOICE_RSSI, GV_RSSI_OFF,
+    VOICE_HEAD, VOICE_TERM, SLOT1_VOICE, SLOT2_VOICE, VOICE_RSSI, GV_RSSI_OFF, GV_RSSI_Q88_MIN,
     TS_CALL_MSK, END_MSK,
     GV_CALL_SEQ_OFF, GV_CALL_INFO_OFF,
     GV_SRC_SUB_OFF, GV_DST_GROUP_OFF,
@@ -464,7 +464,7 @@ class CallTranslator:
             if self._out_stream_id[ts] is None or len(data) < GV_RSSI_OFF + 2:
                 return
             raw  = struct.unpack('>H', data[GV_RSSI_OFF:GV_RSSI_OFF + 2])[0]
-            rssi = -raw / 100
+            rssi = -raw / 256 if raw >= GV_RSSI_Q88_MIN else -raw / 100   # SLR 8.8 : XPR hundredths
             self._out_rssi[ts].append(rssi)
             log.debug('← IPSC ts=%d  RSSI %.2f dBm (raw=0x%04x)', ts, rssi, raw)
             a1_72, a2_72, a3_72 = self._out_last_ambe[ts] or (_AMBE_SILENCE_72,) * 3
