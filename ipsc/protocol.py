@@ -667,9 +667,17 @@ class IPSCPeerProtocol(asyncio.DatagramProtocol):
             self._translator.peer_joined()
             self._status_changed()
 
+    def _registered(self) -> bool:
+        return self._connected and self._state in (self._REGISTERED, self._ACTIVE)
+
     def _on_peer_list_reply(self, data: bytes, host: str, port: int):
-        self._missed = 0
-        self._state  = self._ACTIVE
+        # The master also sends this unprompted when its mesh changes. One that lands
+        # while we wait for MASTER_REG_REPLY updates the mesh but is no registration:
+        # taking it for one stopped the retries and left us keepaliving a master that
+        # never registered us, with voice dropped both ways (VE7NWR, 2026-10-12).
+        if self._registered():
+            self._missed = 0
+            self._state  = self._ACTIVE
         # 0x93 + master_id(4) + entries_len(2) + N*[id(4) ip(4) port(2) mode(1)]
         if len(data) < 7:
             log.warning('IPSC peer: PEER_LIST_REPLY too short (%d bytes)', len(data))
@@ -782,7 +790,8 @@ class IPSCPeerProtocol(asyncio.DatagramProtocol):
                 p['outstanding'] += 1
 
     def _on_alive_reply(self, data: bytes, host: str, port: int):
-        self._missed = 0
+        if self._registered():          # a late one must not hold off a registration retry
+            self._missed = 0
         self._master_last = time()
         log.debug('MASTER_ALIVE_REPLY from master %s:%d', host, port)
 
@@ -869,36 +878,46 @@ class IPSCPeerProtocol(asyncio.DatagramProtocol):
         self._register()
         while True:
             await asyncio.sleep(self._cfg.keepalive_interval)
-            self._translator.check_call_timeouts()
+            self._tick()
 
-            if self._state == self._REGISTERING:
-                # Count ticks without a reply; retry after keepalive_missed_max attempts
+    def _tick(self):
+        """One keepalive interval: retry registration, or keepalive the master and mesh."""
+        self._translator.check_call_timeouts()
+
+        if self._state == self._REGISTERING:
+            # Count ticks without a reply; retry after keepalive_missed_max attempts
+            self._missed += 1
+            if self._missed >= self._cfg.keepalive_missed_max:
+                log.warning(
+                    'IPSC peer: no registration reply from master %s:%d '
+                    'after %d attempts — retrying',
+                    *self._master_addr, self._cfg.keepalive_missed_max,
+                )
+                self._register()   # resets _missed to 0
+
+        elif self._state in (self._REGISTERED, self._ACTIVE) and not self._connected:
+            # Never hold a keepalive session without a registration behind it.
+            log.warning('IPSC peer: in %s without a registration — re-registering',
+                        self._state)
+            self._register()
+
+        elif self._state in (self._REGISTERED, self._ACTIVE):
+            if self._missed >= self._cfg.keepalive_missed_max:
+                log.warning(
+                    'IPSC peer: %d consecutive keepalives unanswered by master %s:%d '
+                    '— re-registering',
+                    self._cfg.keepalive_missed_max, *self._master_addr,
+                )
+                self._lose_connection()
+                self._register()   # resets _missed to 0
+            else:
+                self._send_alive()
                 self._missed += 1
-                if self._missed >= self._cfg.keepalive_missed_max:
-                    log.warning(
-                        'IPSC peer: no registration reply from master %s:%d '
-                        'after %d attempts — retrying',
-                        *self._master_addr, self._cfg.keepalive_missed_max,
-                    )
-                    self._register()   # resets _missed to 0
 
-            elif self._state in (self._REGISTERED, self._ACTIVE):
-                if self._missed >= self._cfg.keepalive_missed_max:
-                    log.warning(
-                        'IPSC peer: %d consecutive keepalives unanswered by master %s:%d '
-                        '— re-registering',
-                        self._cfg.keepalive_missed_max, *self._master_addr,
-                    )
-                    self._lose_connection()
-                    self._register()   # resets _missed to 0
-                else:
-                    self._send_alive()
-                    self._missed += 1
-
-            # Full mesh: once the master has given us the peer list, register
-            # with and keepalive every peer directly.
-            if self._state == self._ACTIVE:
-                self._service_mesh_peers()
+        # Full mesh: once the master has given us the peer list, register
+        # with and keepalive every peer directly.
+        if self._state == self._ACTIVE:
+            self._service_mesh_peers()
 
     # ------------------------------------------------------------------
     # Auth helpers (identical to IPSCMasterProtocol)
@@ -929,7 +948,7 @@ class IPSCPeerProtocol(asyncio.DatagramProtocol):
     def _repeater_addr(self):
         """The master, while we are registered and it is the repeater this instance
         serves: (host, port) or None."""
-        if not (self._connected and self._state in (self._REGISTERED, self._ACTIVE)):
+        if not self._registered():
             return None
         if self._master_peer_id not in (None, self._cfg.hbp_repeater_id):
             return None
@@ -951,7 +970,7 @@ class IPSCPeerProtocol(asyncio.DatagramProtocol):
         """The master we registered with, then every mesh peer it listed — connected
         or not by the same keepalive rules this stack acts on. No IP addresses."""
         from ipsc.status import iso
-        master_up = self._connected and self._state in (self._REGISTERED, self._ACTIVE)
+        master_up = self._registered()
         out = [{
             'peer_id': self._master_peer_id,
             'role': 'master',
